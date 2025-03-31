@@ -1,0 +1,698 @@
+---
+title: "Robustness checks statistical matching"
+author: "Katie Devenish"
+date: '2025-01-09'
+output:
+  pdf_document: default
+  html_document: default
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Libraries
+
+```{r loading libraries, message = FALSE}
+library("foreign")
+library("dplyr")
+library("ggplot2")
+library("MatchIt")
+library("ggrepel")
+library("calibrate")
+library("plm")
+library("gridExtra")
+library("tidyr")
+library("gplots")
+library("terra")
+library("sf")
+library("foreach")
+library("randomForest")
+library("purrr")
+
+```
+
+# Sections
+
+# 1) Data Preparation
+
+## 1a) Load data
+
+You can use your own data or the data provided from the Devenish et al.,
+(2022) study. If using your own data please ensure it is in the same
+long format as the dataset entitled Ankerana_sample. You will also need
+to change the column names in the code to match those in your data.
+
+```{r}
+
+ANK <- read.dbf("Input_data_for_exercise/Ankerana_sample.dbf")
+Cont <- read.dbf("Input_data_for_exercise/Control_sample.dbf")
+
+cols <- c("X","Y","Tree_loss", "Pop_density", "Dist_sett", "Slope", "Elevation", "Annual_Rain", "Dist_track", "Dist_road", "Dist_river", "Dist_edge", "Dist_defor", "treated")
+
+names(Cont) <- paste0(cols)
+names(ANK) <- paste0(cols)
+
+# Merge treated and control datasets
+
+data <- rbind(ANK, Cont)
+
+```
+
+ANK is the sample data from the Ankerana offset. It contains
+deforestation outcomes and covariate values from 2,862 sample pixel
+locations within the boundaries of the Ankerana offset.
+
+Cont is the control data. It contains deforestation outcomes and
+covariate values at 634,465 control pixel locations sampled from the
+ex-Province of Toamasina, outside of Protected Areas (excluding the
+CAZ), biodiversity offsets and a 10km buffer zone around the offsets.
+
+-   X and Y columns contain the Latitude and Longitude in metres. We
+    don't need this data and will remove.
+-   Tree_loss contains deforestation year data of Hansen et al., (2013).
+    A value of 0 means no deforestation was detected at that pixel,
+    which remained forested by the end of 2019. A value of 1-19 refers
+    to the year in which the pixel was deforested.
+-   Columns 4- 13 contain the covariate values at that location.
+-   treated is a binary indicator of whether the observation (pixel)
+    comes from a treated (i.e. offset) or control area.
+
+If you are using your own data please format in the same way with
+separate columns for your outcome variable, covariates, and a binary
+variable indicating treatment status.
+
+## 1b) Pre-filter data to remove control pixels unlikely to be matched.
+
+This pre-processing stage is intended to increase computational
+efficiency by reducing the size of the control data . This is done by
+removing control pixels with values far outside the range of the treated
+sample in any of the 5 essential covariates which would never have been
+matched. The range is defined as min(𝑥) − 𝜎(𝑥) to max(𝑥) + 𝜎(𝑥); where 𝑥
+refers to the covariate values in the offset sample and 𝜎, the standard
+deviation. Values outside this range are removed. Do this for all 5
+essential covariates.
+
+First, tidy the data to remove erroneous -9999 values (this is the value
+GIS software assigns for NoData)
+
+Then, filter the data to remove observations outside the acceptable
+range.
+
+If conducting this analysis with your own data replace the variable
+names with your own from here on.
+
+```{r}
+
+# Convert -9999 values to NA then drop from the data.
+
+data[] <- lapply(data, function(x) na_if(x, -9999))
+
+data <- data %>% drop_na
+
+# Set the size of the caliper (how many standard deviations of the range of treated values) 
+x <- 1
+
+caliper_dist_def<-x*sd(data$Dist_defor[data$treated==1])
+caliper_slope<-x*sd(data$Slope[data$treated==1])
+caliper_elev<-x*sd(data$Elevation[data$treated==1])
+caliper_edge<-x*sd(data$Dist_edge[data$treated==1])
+caliper_road <- x*sd(data$Dist_road[data$treated==1])
+  
+  # Keep only observations which are within the accepted range of values for each covariate.
+  
+  data <- data[data$Dist_defor < max(data$Dist_defor[data$treated==1])+caliper_dist_def,]  
+  data <- data[data$Dist_defor > min(data$Dist_defor[data$treated==1])- caliper_dist_def,]
+  
+  data <- data[data$Slope < max(data$Slope[data$treated==1])+caliper_slope,]      
+  data <- data[data$Slope > min(data$Slope[data$treated==1])- caliper_slope,]
+  
+  data <- data[data$Elevation < max(data$Elevation[data$treated==1])+caliper_elev,]  
+  data <- data[data$Elevation > min(data$Elevation[data$treated==1])-caliper_elev,]  
+  
+  data <- data[data$Dist_edge < max(data$Dist_edge[data$treated==1])+caliper_edge,]
+  data <- data[data$Dist_edge > min(data$Dist_edge[data$treated==1])-caliper_edge,]
+  
+  data <- data[data$Dist_road < max(data$Dist_road[data$treated==1])+caliper_road,]
+  data <- data[data$Dist_road > min(data$Dist_road[data$treated==1])-caliper_road,]
+  
+```
+
+This reduces the size of the dataset from 636,301 to 198,827
+observations.
+
+Add column for pixel ID:
+
+```{r}
+data$ID <- seq(nrow(data))              # Add column for observation ID
+rownames(data) <- data$ID
+
+```
+
+# 2) Run the matching using the main matching specification
+
+## 2.1) Run the matching
+
+The below code uses the main specification chosen in the Devenish et
+al., study. 1-1 nearest neighbour Mahalanobis matching, without
+replacement and a caliper of 1 standard deviation.
+
+Feel free to chose a different specification as your main model by
+substituting the parameters (cal, method, distance and replace) of the
+model below. If running with your own data, replace variable names with
+your own.
+
+```{r}
+
+variables <- c("Slope", "Elevation", "Dist_road", "Dist_edge", "Dist_defor")
+
+# Set caliper for each covariate
+
+calip <- rep(1, length(variables))   # Replace 1 with a different value to set more or less restrictive calipers if you wish.
+
+names(calip) <- variables
+
+Main_output <- matchit(treated ~ Slope + Elevation + Dist_road + Dist_edge + Dist_defor,
+                   data= data, method= "nearest", distance = "mahalanobis", replace = FALSE, caliper=calip)
+
+Main_sum <- summary(Main_output, standardize = TRUE)
+
+print(Main_sum)
+
+```
+
+Interrogate the summary statistics. Check whether the Std. Mean Diff for
+the matched data is less than 0.2 and the number of treated units which
+were matched.
+
+Extract key summary statistics and combine into one dataframe which we
+call cov_balance.
+
+```{r}
+
+test <- as.data.frame(Main_sum$sum.matched[,3])           # Standardardize mean diff. in each covariate values between matched pairs
+
+colnames(test) <- "Stand_Mean_Diff"
+mean_std_diff <- mean(abs(test$Stand_Mean_Diff))        # Mean value of the std diff
+max_std_diff <- max(abs(test$Stand_Mean_Diff))          # Max value of the std diff
+unmatched <- Main_sum$nn[5,2] 
+total_treated <- Main_sum$nn[1,2]    # This gives the number of unmatched treate units.
+perc_unmatched <- (unmatched/total_treated)*100
+
+cov_balance_main <- cbind(perc_unmatched, mean_std_diff,max_std_diff, unmatched, total_treated)
+
+```
+
+We can see that this matching specification yielded good covariate
+balance (max Std Mean Diff = 0.04, mean = 0.019) and matched all 2,862
+treated units.
+
+Now, we need extract the matched control pixels and test whether the
+matched data meet the condition of parallel trends.
+
+## 2.2) Extract matched pairs
+
+```{r}
+m.data <- match.data(Main_output, group = "all", distance = "distance", weights = "weights", subclass = "subclass", data = data, drop.unmatched = TRUE)
+
+```
+
+m.data contains the matched treated (n = 2862) and control (n = 2862)
+observations
+
+## 2.3) Reformat data aggregating pixels by treatment status and year
+
+For the next stage (outcome regressions), we no longer need the
+covariate data. We are only interested in comparing deforestation
+between the treated and control samples, before and after the offset was
+protected in 2011.
+
+Aggregate the pixel data to the level of the sample (offset or control)
+and by year. This gives the total count of deforestation per year in the
+offset and the control sample. If using your own data set y to the year
+of the intervention.
+
+```{r}
+
+annual_defor <- data.frame(table(factor(m.data$Tree_loss, levels = 1:19), m.data$treated))
+
+names(annual_defor) <- c("Year", "Treated", "Annual_Deforestation")
+annual_defor$Year <- as.numeric(annual_defor$Year)
+
+# Set y to the year of the intervention. In this example, the Ankerana offset was first protected in 2011.
+
+y <- 11
+
+# Assign a binary variable indicating whether the observation is from a year before (0) or after (1) treatment. 
+
+annual_defor$Time <- factor(ifelse(annual_defor$Year >= y, 1,0))
+
+
+```
+
+A log(y+1) transformation of the outcome variable is required because
+the non-normal properties of count data violate assumptions of
+homoscedascity of linear models.
+
+Transform the outcome variable:
+
+```{r}
+annual_defor$log_annual_defor <- log(annual_defor$Annual_Deforestation + 1)
+
+```
+
+## 2.3) Test for parallel trends
+
+Before running the DiD regressions we need to check that the matched
+data conforms to the assumption of parallel trends in deforestation in
+the pre-intervention period.
+
+Subset the data to leave only the pre-intervention years:
+
+```{r}
+data_before <- annual_defor[(annual_defor$Year < y),]
+
+```
+
+Run the regression to test for parallel trends:
+
+```{r}
+
+pt_test <- lm(log_annual_defor ~ Year*Treated, data= data_before)
+
+summary(pt_test)
+
+```
+
+Interrogate the results. Does the data show parallel trends?
+
+Yes - the coefficient of Year:Treated is not statistically significant.
+This means that being in the offset sample compared the control sample
+has no effect on the trend in deforestation over time.
+
+As the coefficient of Year is not significant, there is no significant
+trend in deforestation over time in the pre-intervention period in the
+control nor the offset sample.
+
+## 2.4) Run DiD regression
+
+Formula = y \~ treatment + time + (treatment x time). This time use the
+full dataset.
+
+The interaction between treated and time is the coefficent of interest.
+This represents the effect of an observation being in an offset after
+protection on the log-transformed count of deforestation. If this is
+significant and negative it means protection significantly reduced
+deforestation within the offset, relative to the counterfactual.
+
+```{r}
+DiD_res <- lm(log_annual_defor ~ Treated*Time, data= annual_defor)
+
+summary(DiD_res)
+
+```
+
+Interrogate these results. Did offset protection affect deforestation in
+Ankerana?
+
+...
+
+Yes! The coefficient of Treated:Time is negative and significant. This
+means that deforestation was significantly lower in Ankerana than the
+matched control sample after protection (controlling for
+pre-intervention differences between the two samples).
+
+However, this estimate relates to the log-transformed count of
+deforestation, back-transform to get a more meaningful result.
+
+```{r}
+
+exp(coef(DiD_res)[4])-1
+exp(confint(DiD_res)[4,])-1
+
+```
+
+This shows that protection reduced deforestation by an estimated average
+of 96% (89 - 98%) per year within Ankerana.
+
+# 3) Robustness checks
+
+Check these results are robust to alternative matching model choices. We
+do this in two stages. First, we vary the choice of statistical distance
+measure and model parameters, keeping the selection of covariates
+constant (using the only 5 essential covariates). Secondly, keeping the
+distance measure and model parameters constant, we test the effect of
+including all possible combinations of additional covariates alongside
+the essential set.
+
+To do so, we run two functions which repeat the matching and DiD
+regressions iteratively for each of different matching specifications.
+
+\*\* Beware: running the parameters loops will likely take a long-time
+(however long it took to run the matching for the main specification
+multiplied by \~54 times!)\*\*
+
+## 3.1) Test the effect of varying the parameters
+
+```{r}
+the_parameters_loop <- function(x, caliper_value, replacement, distance, ratio, year){
+  
+  loop_parameters <<- foreach(cali=caliper_value, .combine=rbind, .packages=c("MatchIt","dplyr")) %do% {
+    foreach(rep=replacement, .combine=rbind, .packages=c("MatchIt","dplyr")) %do% {
+      foreach(dist=distance, .combine=rbind, .packages=c("MatchIt","dplyr", "randomForest")) %do% {
+   #    foreach(meth=method, .combine=rbind, .packages=c("MatchIt","dplyr")) %do% {    
+          foreach(n=ratio, .combine=rbind, .packages=c("MatchIt","dplyr")) %do% {  
+      
+          
+         
+          # We only keep the pool of esential covariates, treatment index and outcome
+          treated <- x$treated
+          treeloss <- x$Tree_loss
+          x_covs <- x %>% dplyr:: select(all_of(variables))
+          
+          # We create a formula to be inserted in the matching  
+          formulae  <- as.formula(paste("treated ~ ", paste0(names(x_covs),collapse ="+")))
+          
+          
+          #maha <- lapply(mydbs_full, function(cov) {
+          
+          # Calipers
+          cal=rep(cali,ncol(x_covs)) 
+          names(cal) <- names(x_covs)         # We name the vector to be inserted in the matching function
+          
+          
+          # Applying the matching function to 
+          eval_code <- TRUE
+          m.out <- #tryCatch(
+            matchit(formulae, data= cbind(treated,x_covs,treeloss), 
+                    method= "nearest", 
+                    distance = dist, 
+                    replace = rep, 
+                    caliper = cal, 
+                    ratio=n)#, error = function(e) { eval_code <<- FALSE})
+          
+          
+          if(eval_code) {
+            # Summarise results #
+            match_output <-summary(m.out, standardize = TRUE)
+
+            # Extract useful summary values and combine into one dataset # 
+            test <- as.data.frame(match_output$sum.matched[,3])           # Standardardize mean diff. in each covariates value between matched pairs
+            colnames(test) <- "Stand_Mean_Diff"
+            mean_std_diff <- mean(abs(test$Stand_Mean_Diff))        # Mean value of the std diff
+            max_std_diff <- max(abs(test$Stand_Mean_Diff))          # Max value of the std diff
+            unmatched <- match_output$nn[5,2] 
+            cov_balance <- cbind(unmatched, mean_std_diff, max_std_diff)
+         
+table(m.out$weights)            
+             
+#             Create db
+              m.data <- match.data(m.out)
+              
+              if(n == 5){
+              m.data$weights[m.data$treated==0]<-m.data$weights[m.data$treated==0]/5
+              } else if(n == 10){
+              m.data$weights[m.data$treated==0]<-m.data$weights[m.data$treated==0]/10  
+              } else {
+              m.data$weights[m.data$treated==0]<- 1
+              }
+                
+   #           }
+    #          m.data$weights[m.data$treated==0]<-m.data$weights[m.data$treated==0]/5
+#             
+#             # Aggregate pixels by group (offset or control) and year to give a count of pixels                    deforested in each in each sample
+              annual_defor_test <- m.data %>%  # As weights are created with the replace or with PSM,                                                 I change the tabulate approach of base R by a dplyr count
+              count(as.factor(treated), as.factor(treeloss), wt=weights, .drop = F)
+#             
+              label <- c("Sample", "Year", "Annual_Deforestation")
+              names(annual_defor_test) <- paste0(label)
+#        
+             # Have to make Year numeric for >= to work
+             annual_defor_test$Year <- as.numeric(as.character(annual_defor_test$Year))
+             
+             # We delete the 0 values (aka pixels that remain forested at the end)
+             annual_defor_test <- annual_defor_test[annual_defor_test$Year!=0,]
+             
+             
+             # Construct data with dummy variables for time and treated to use in DiD regression
+             
+             ycreation <- year
+             
+             annual_defor_test$Time <- ifelse(annual_defor_test$Year >= ycreation, 1,0)
+             annual_defor_test$TimeF <-factor(annual_defor_test$Time, levels = c(0,1), labels = c("before","after"))
+             annual_defor_test$TreatedF <- factor(annual_defor_test$Sample, levels = c(0,1), labels = c("control","treatment"))
+             
+ 
+             # Export the data for the FE regression later on
+#             save_path_name <- paste0("c:/Users/Virunga/Desktop/Data_for_FE/",
+#                                      name_offset,"/",
+#                          cali,rep,dist,n,".csv")       
+#             write.csv(annual_defor, save_path_name)
+#             
+# 
+#                         # c) Test for parallel trends
+#             
+             # Use only data from the before period #
+#             
+             data_before_test <- annual_defor_test[(annual_defor_test$Year <ycreation),]
+#             
+             Partest <- lm(log(Annual_Deforestation+1) ~ Year*TreatedF, data= data_before_test)
+             summary(Partest)        
+             parralel_trend <- ifelse(summary(Partest)$coefficients[4,4]> 0.05,T,F)    # TBC If the p-val of the interaction term is larger than 0.1, then // trend #
+             
+#             
+#             # d) DiD Regression
+#             
+#             # Formula = y ~ treatment + time + (treatment x time)
+#             
+             modeldid <- lm(log(Annual_Deforestation+1) ~ TreatedF*TimeF, data= annual_defor_test)
+             summary(modeldid)     
+#             
+
+#             #---------------  We export all the information we want
+#             
+            # A list of covariates that were included
+            var <- as.data.frame(t(rep(FALSE,5)))
+            names(var)  <- c("Pop_density", "Dist_sett", "Annual_Rain", "Dist_track", "Dist_river")
+
+            # We export
+     m1i <-   data.frame(coef=summary(modeldid)$coefficients[4,1],      # The coefficient of the DiD
+                                se=summary(modeldid)$coefficients[4,2],        # The standard error of the coefficient
+                                cov_balance,                                # The covariate balance
+                               parralel_trend,                                 # Parralel trend info
+                               #                      Gen=as.logical(F), NN1=as.logical(F), ebal=as.logical(F), psm=as.logical(T), lm=as.logical(F),
+                               var,
+                               cal025=ifelse(cali==0.25,as.logical(T),as.logical(F)), cal05=ifelse(cali==0.5,as.logical(T),as.logical(F)),cal1=ifelse(cali==1,as.logical(T),as.logical(F)),
+                               replacement=ifelse(rep==T,as.logical(T),as.logical(F)),
+                               maha=ifelse(dist=="mahalanobis",as.logical(T),as.logical(F)), glm=ifelse(dist=="glm",as.logical(T),as.logical(F)), rf=ifelse(dist=="randomforest",as.logical(T),as.logical(F)),
+#                               NN=ifelse(meth=="nearest",as.logical(T),as.logical(F)), genetic=ifelse(meth=="genetic", as.logical(T), as.logical(F)),
+                               ratio1=ifelse(n==1,as.logical(T),as.logical(F)),ratio5=ifelse(n==5,as.logical(T),as.logical(F)),ratio10=ifelse(n==10,as.logical(T),as.logical(F))
+            )
+
+          }
+          }}}}}
+
+the_parameters_loop(data,
+                    caliper_value = c(0.25,0.5,1), 
+                    replacement = c(T,F), 
+                    distance = c("mahalanobis","glm","randomforest"),
+                    ratio=c(1,5,10),
+                    year = 11)
+
+write.csv(loop_parameters, "Output/loop_parameters_results.csv")
+
+```
+
+## 3.2) Test the effect of including additional covariates
+
+Test the effect of adding additional covariates holding the distance
+measure and model parameters constant (as in the main specification):
+
+```{r}
+
+all_variables <- c("Slope", "Elevation", "Dist_road", "Dist_edge", "Dist_defor", "Pop_density", "Dist_sett", "Annual_Rain", "Dist_track", "Dist_river")
+
+# If using your own data replace with your own variable names, including extra ones you wish to test the effect of including.
+
+the_cov_loop <- function(data, ycreation, caliper_value) {
+  # We only keep the ppol of covaiates, treatment index and outcome
+  db<-data %>% dplyr:: select(all_of(all_variables))
+  treated <- data$treated
+  treeloss <- data$Tree_loss
+  
+  
+  
+  # We define two set of covariates
+  covariates_min <- variables  # A set of minimal covariates that should be included in any matching
+  covariates_add <- names(db[,6:10])    # Additional covariates
+
+
+  
+  # We determine how many different models can be constructed based on the inclusion of additional covariates
+  id <- unlist(
+    lapply(1:length(covariates_add),
+           function(i)combn(1:length(covariates_add),i,simplify=FALSE)
+    )
+    ,recursive=FALSE)
+  
+  # We create all combinations of required + optional covariates
+  mydbs_full <- lapply(id,function(i) c(covariates_min, covariates_add[i]))
+  
+  
+  # We loop over all possible models based on any combination of 
+  
+  maha <- lapply(mydbs_full, function(cov) {
+    
+    idx <- match(cov, names(db))   # We determines the columns of the covariates
+    idx <- sort(idx)               # We need to arrange them in increasing order
+    NewDF <- db[,c(idx)]           # We create a database that contains only the covariates needed in this iteration of the loop
+    
+    formulae  <- as.formula(paste("treated ~ ", paste0(names(NewDF),collapse ="+")))  # We create a formula to be inserted in the matching
+    
+    
+    
+    # Calipers
+    cal=rep(caliper_value,length(cov)) # In the version 4.0 of matchIT, we now need to put calipers for each variables included in the model
+    names(cal) <- cov         # We name the vestor to be inserted in the matching function
+    
+    
+    # Applying the matching function to 
+    eval_code <- TRUE
+    m.out <- tryCatch(
+      matchit(formulae, data= cbind(treated,NewDF,treeloss), 
+              method= "nearest", 
+              distance = "mahalanobis", 
+              ratio = 1,
+              replace = F, 
+              caliper = cal), error = function(e) {eval_code <<- FALSE})
+
+    if(eval_code) {
+      # Summarise results #
+      match_output <-summary(m.out, standardize = TRUE)
+      
+      # Extract useful summary values and combine into one dataset # 
+      SMD <- as.data.frame(match_output$sum.matched[,3])
+      colnames(SMD) <- "Stand_Mean_Diff"
+      mean_std_diff <- mean(abs(SMD$Stand_Mean_Diff))        # Mean value of the std diff
+      max_std_diff <- max(abs(SMD$Stand_Mean_Diff))          # Max value of the std diff
+      unmatched <- match_output$nn[5,2]
+      
+      cov_balance <- cbind(unmatched, mean_std_diff,max_std_diff)
+      
+      # Create db
+      m.data <- match.data(m.out)
+      
+      
+      # Aggregate pixels into treatment (offset_l_l) and control groups. Tabulate the number of pixels by tree loss year within each group (count of number of pixels within each group deforested each year)
+      annual_defor_test <- m.data %>%  # As weights are created with the replace or with PSM, I change the tabulate approach of base R by a dplyr count
+        count(as.factor(treated), as.factor(treeloss), .drop = F)
+      
+      label <- c("Sample", "Year", "Annual_Deforestation")
+      names(annual_defor_test) <- paste0(label)
+
+      
+      # Have to make Year numeric for >= to work
+      annual_defor_test$Year <- as.numeric(as.character(annual_defor_test$Year))
+      
+      
+      # We delete the 0 values (aka pixels that remain forested at the end)
+      annual_defor_test <- annual_defor_test[annual_defor_test$Year!=0,]
+      
+      # Construct data with dummy variables for time and treated to use in DiD regression
+      annual_defor_test$Time <- ifelse(annual_defor_test$Year >= ycreation, 1,0)
+      annual_defor_test$TimeF <-factor(annual_defor_test$Time, levels = c(0,1), labels = c("before","after"))
+      annual_defor_test$TreatedF <- factor(annual_defor_test$Sample, levels = c(0,1), labels = c("control","treatment"))
+            
+   
+      # c) Test for parallel trends
+      
+      # Use only data from the before period #
+      
+      data_before <- annual_defor_test[(annual_defor_test$Year < ycreation),]
+      
+      Partest <- lm(log(Annual_Deforestation+1) ~ Year*TreatedF, data= data_before)
+      summary(Partest)        
+      parralel_trend <- ifelse(summary(Partest)$coefficients[4,4]> 0.05,T,F)    
+      
+      
+      
+      
+      # d) DiD Regression
+      
+      # Formula = y ~ treatment + time + (treatment x time)
+      
+      modeldid <- lm(log(Annual_Deforestation+1) ~ TreatedF*TimeF, data= annual_defor_test)
+      summary(modeldid)     
+      
+      
+      
+
+      
+      
+      #---------------  We export all the information we want
+      
+      # A list of covariates that were included
+      var <- as.data.frame(t(covariates_add %in% names(NewDF)))
+      names(var)  <- covariates_add  
+      
+      # We export
+      m1i <- data.frame(coef=summary(modeldid)$coefficients[4,1],      # The coefficient of the estimation
+                          se=summary(modeldid)$coefficients[4,2],        # The standard error of the coefficient
+                          cov_balance,                                # The covariate balance
+                          parralel_trend,                                 # Parralel trend info
+                          #                      Gen=as.logical(F), NN1=as.logical(F), ebal=as.logical(F), psm=as.logical(T), lm=as.logical(F),
+                          var,                                             # The extra covariates included
+                          cal025=as.logical(F), cal05=as.logical(F),cal1=as.logical(T),
+                          replacement=as.logical(F),
+                          maha=as.logical(T), glm=as.logical(F), rf=as.logical(F),
+                          #NN=ifelse(meth=="nearest",as.logical(T),as.logical(F)), genetic=ifelse(meth=="genetic", as.logical(T), as.logical(F)),
+                          ratio1=as.logical(T), ratio5=as.logical(F), ratio10=as.logical(F))
+      
+      
+      
+    }
+  }
+)
+    
+  
+  synthesis_loop_cov <<- data.frame(do.call("rbind",maha))
+}
+
+
+```
+
+Merge outputs from the two loops:
+
+```{r}
+
+robustness_checks <- rbind(loop_parameters, synthesis_loop_cov)
+
+```
+
+# **4) Explore these results**
+
+Set criteria to identify specifications which were a-posteriori invalid,
+i.e. those which did not match a sufficient number of treated units,
+produce acceptable covariate balance, or parallel trends in
+pre-intervention outcomes. Exclude these results because they do not
+represent appropriate counterfactual comparisons.
+
+Explore the remaining results. Try plotting the coefficients,
+calculating the standard deviation, or extracting the highest 10% and
+lowest 10% of estimates.
+
+**Questions:**
+
+-   How much does the estimated treatment effect vary when different
+    matching specifications are used? Are there any estimates which
+    change sign or significance under different specifications.
+-   If you obtained this range of results, would you be confident that
+    your results are robust?
+-   Does varying the distance measure, model parameters or covariates
+    appear to have the greatest effect on estimates. Desbureaux (2021)
+    conducted a step-wise regression to quantify which modelling choices
+    had the greatest influence on estimates in his study. You could
+    consider doing the same in your study.
