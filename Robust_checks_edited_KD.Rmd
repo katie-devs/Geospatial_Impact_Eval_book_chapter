@@ -161,7 +161,7 @@ al., study. 1-1 nearest neighbour Mahalanobis matching, without
 replacement and a caliper of 1 standard deviation.
 
 Feel free to chose a different specification as your main model by
-substituting the parameters (cal, method, distance and replace) of the
+substituting the parameters (caliper, method, distance and replace) of the
 model below. If running with your own data, replace variable names with
 your own.
 
@@ -357,7 +357,108 @@ This shows that protection reduced deforestation by an estimated average
 of 96% (89 - 98%) per year within Ankerana.
 
 
-# 6)	Check the robustness of these results to alternative matching specifications
+# 6) Run a fixed effects panel regression on data from all four offsets
+
+## 6a) Load pre-prepared, matched datasets for the other three offsets, tidy and merge with Ankerana data
+
+```{r}
+
+# Load pre-prepared matched and aggregated data for the other three offsets:
+
+CZ_FE_dat <- read.csv('Input_data_for_exercise/CZ_FE_dat.csv')
+CFAM_FE_dat <- read.csv('Input_data_for_exercise/CFAM_FE_dat.csv')
+TTF_FE_dat <- read.csv('Input_data_for_exercise/TTF_FE_dat.csv')
+
+ANK_FE_dat <- annual_defor
+
+
+# Change the column names in the data the other offsets to match those of Ankerana. Create function and then apply to all new datasets.
+
+tidy_data <- function(data){
+  data <- data[, -1] %>%         # Remove the first column X
+    rename(Time = TimeF) %>%     # Rename columns to match those in ANK_FE_dat
+    rename(Treated = TreatedF)
+}
+
+CZ_FE_dat <- tidy_data(CZ_FE_dat)
+CFAM_FE_dat <- tidy_data(CFAM_FE_dat)
+TTF_FE_dat <- tidy_data(TTF_FE_dat)
+
+
+# Change the name of the matched control samples in each of the datasets. They are currently all called 'Cont' so when the data are pooled, the plm function will assume these observations are all from a single group, leading to an unbalanced panel. We need to change the names to ensure that when the data are pooled, each control sample is treated as a separate sample.
+
+CZ_FE_dat$Sample[CZ_FE_dat$Sample == 'Cont'] <- 'CZ1'
+CFAM_FE_dat$Sample[CFAM_FE_dat$Sample == 'Cont'] <- 'CFAM1'
+TTF_FE_dat$Sample[TTF_FE_dat$Sample == 'Cont'] <- 'TTF1'
+
+# Make the sample variable a factor
+
+CZ_FE_dat$Sample <- as.factor(CZ_FE_dat$Sample)
+CFAM_FE_dat$Sample <- as.factor(CFAM_FE_dat$Sample)
+TTF_FE_dat$Sample <- as.factor(TTF_FE_dat$Sample)
+
+# Add a sample column to ANK_FE_dat
+
+ANK_FE_dat$Sample <- ifelse(ANK_FE_dat$Treated == 1, 'ANK', 'ANK1')
+
+# Factorise
+
+ANK_FE_dat$Sample <- as.factor(ANK_FE_dat$Sample)
+
+# Re-order columns in ANK_FE_dat to match the other datasets
+
+ANK_FE_dat <- ANK_FE_dat[, c(1,6, 3, 4, 2, 5)]
+
+
+# Merge all four offset-control datasets
+
+FE_dat <- rbind(ANK_FE_dat, CFAM_FE_dat, CZ_FE_dat, TTF_FE_dat)
+
+# We need to factorise the year variable
+
+FE_dat$Year <- factor(FE_dat$Year)
+
+
+# Make one variable indicating treated status. Tr = 1 for observations from an offset after protection and 0 for observations from an offset before protection and the control sample. Cannot use Treated and Time and the interaction because these are collinear with the fixed effects. 
+
+FE_dat$Tr <- ifelse(FE_dat$Treated== "1" & FE_dat$Time== "1",1,0) 
+
+
+```
+
+
+## 6b) Run the fixed effects panel regression
+
+Tr is the coefficient of interest in this regression. A significant negative coefficient indicates there was significant reduction in the log-transformed count of deforestation following protection of the four biodiversity offsets.
+
+```{r}
+
+FE_all <- plm(log_annual_defor ~ Tr, 
+              data= FE_dat, index = c("Sample", "Year"), model= "within", effect = "twoways")
+summary(FE_all)
+
+
+```
+
+
+## 6c) Back-transform the estimates.
+
+```{r}
+
+(exp(coef(FE_all))-1)*100   
+(exp(confint(FE_all))-1)*100   
+
+```
+Interrogate these results. Did offset protection reduce deforestation on average across all four offsets?
+
+...
+
+Yes! The coefficient of Tr is negative and significant. Backtransforming this estimate shows that protection reduced deforestation across the entire offset portfolio by an average of 58% per year, relative to the estimated counterfactual. The 95% confidence interval on this estimate is 37 - 73%.
+
+
+
+
+# 7)	Check the robustness of these results to alternative matching specifications
 
 Check these results are robust to alternative matching model choices. We
 do this in two stages. First, we vary the choice of statistical distance
@@ -374,7 +475,7 @@ regressions iteratively for each of different matching specifications.
 (however long it took to run the matching for the main specification
 multiplied by \~54 times!)\*\*
 
-## 6a) Run the_parameters_loop to test the effect of varying the statistical distance measure and model parameters
+## 7a) Run the_parameters_loop to test the effect of varying the statistical distance measure and model parameters
 
 ```{r}
 the_parameters_loop <- function(x, caliper_value, replacement, distance, ratio, year){
@@ -525,7 +626,8 @@ write.csv(loop_parameters, "Output/loop_parameters_results.csv")
 
 ```
 
-## 6b) Run the_cov_loop to test the effect of including additional covariates
+
+## 7b) Run the_cov_loop to test the effect of including additional covariates
 
 Test the effect of adding additional covariates holding the distance
 measure and model parameters constant (as in the main specification):
@@ -683,7 +785,7 @@ the_cov_loop <- function(data, ycreation, caliper_value) {
 
 ```
 
-## 6c) Merge outputs from the two loops:
+## 7c) Merge outputs from the two loops:
 
 ```{r}
 
@@ -691,7 +793,7 @@ robustness_checks <- rbind(loop_parameters, synthesis_loop_cov)
 
 ```
 
-## 6d) Examine the results
+## 7d) Examine the results
 
 Set criteria to identify specifications which were a-posteriori invalid,
 i.e. those which did not match a sufficient number of treated units,
@@ -699,7 +801,7 @@ produce acceptable covariate balance, or parallel trends in
 pre-intervention outcomes. Exclude these results because they do not
 represent appropriate counterfactual comparisons.
 
-## 6e) Explore the remaining results. 
+## 7e) Explore the remaining results. 
 
 Try plotting the coefficients, calculating the standard deviation, or extracting the highest 10% and
 lowest 10% of estimates.
@@ -718,111 +820,4 @@ lowest 10% of estimates.
     consider doing the same in your study.
     
     
-
-# 7) Run a fixed effects panel regression on data from all four offsets
-
-## 7a) Load pre-prepared, matched datasets for the other three offsets, tidy and merge with Ankerana data
-
-```{r}
-
-# Load pre-prepared matched and aggregated data for the other three offsets:
-
-CZ_FE_dat <- read.csv('Input_data_for_exercise/CZ_FE_dat.csv')
-CFAM_FE_dat <- read.csv('Input_data_for_exercise/CFAM_FE_dat.csv')
-TTF_FE_dat <- read.csv('Input_data_for_exercise/TTF_FE_dat.csv')
-
-ANK_FE_dat <- annual_defor
-
-
-# Change the column names in the data the other offsets to match those of Ankerana. Create function and then apply to all new datasets.
-
-tidy_data <- function(data){
-  data <- data[, -1] %>%         # Remove the first column X
-    rename(Time = TimeF) %>%     # Rename columns to match those in ANK_FE_dat
-    rename(Treated = TreatedF)
-}
-
-CZ_FE_dat <- tidy_data(CZ_FE_dat)
-CFAM_FE_dat <- tidy_data(CFAM_FE_dat)
-TTF_FE_dat <- tidy_data(TTF_FE_dat)
-
-
-# Change the name of the matched control samples in each of the datasets. They are currently all called 'Cont' so when the data are pooled, the plm function will assume these observations are all from a single group, leading to an unbalanced panel. We need to change the names to ensure that when the data are pooled, each control sample is treated as a separate sample.
-
-CZ_FE_dat$Sample[CZ_FE_dat$Sample == 'Cont'] <- 'CZ1'
-CFAM_FE_dat$Sample[CFAM_FE_dat$Sample == 'Cont'] <- 'CFAM1'
-TTF_FE_dat$Sample[TTF_FE_dat$Sample == 'Cont'] <- 'TTF1'
-
-# Make the sample variable a factor
-
-CZ_FE_dat$Sample <- as.factor(CZ_FE_dat$Sample)
-CFAM_FE_dat$Sample <- as.factor(CFAM_FE_dat$Sample)
-TTF_FE_dat$Sample <- as.factor(TTF_FE_dat$Sample)
-
-# Add a sample column to ANK_FE_dat
-
-ANK_FE_dat$Sample <- ifelse(ANK_FE_dat$Treated == 1, 'ANK', 'ANK1')
-
-# Factorise
-
-ANK_FE_dat$Sample <- as.factor(ANK_FE_dat$Sample)
-
-# Re-order columns in ANK_FE_dat to match the other datasets
-
-ANK_FE_dat <- ANK_FE_dat[, c(1,6, 3, 4, 2, 5)]
-
-
-# Merge all four offset-control datasets
-
-FE_dat <- rbind(ANK_FE_dat, CFAM_FE_dat, CZ_FE_dat, TTF_FE_dat)
-
-# We need to factorise the year variable
-
-FE_dat$Year <- factor(FE_dat$Year)
-
-
-# Make one variable indicating treated status. Tr = 1 for observations from an offset after protection and 0 for observations from an offset before protection and the control sample. Cannot use Treated and Time and the interaction because these are collinear with the fixed effects. 
-
-FE_dat$Tr <- ifelse(FE_dat$Treated== "1" & FE_dat$Time== "1",1,0) 
-
-
-```
-
-
-## 7b) Run the fixed effects panel regression
-
-Tr is the coefficient of interest in this regression. A significant negative coefficient indicates there was significant reduction in the log-transformed count of deforestation following protection of the four biodiversity offsets.
-
-```{r}
-
-FE_all <- plm(log_annual_defor ~ Tr, 
-              data= FE_dat, index = c("Sample", "Year"), model= "within", effect = "twoways")
-summary(FE_all)
-
-
-```
-
-## 7c) Back-transform the estimates.
-
-```{r}
-
-(exp(coef(FE_all))-1)*100   
-(exp(confint(FE_all))-1)*100   
-
-```
-Interrogate these results. Did offset protection reduce deforestation on average across all four offsets?
-
-...
-
-Yes! The coefficient of Tr is negative and significant. Backtransforming this estimate shows that protection reduced deforestation across the entire offset portfolio by an average of 58% per year, relative to the estimated counterfactual. The 95% confidence interval on this estimate is 37 - 73%.
-
-
-
-
-
-
-
-
-
-
 
