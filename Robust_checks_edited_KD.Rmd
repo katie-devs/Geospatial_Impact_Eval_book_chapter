@@ -39,7 +39,7 @@ library("purrr")
 
 # 1) Data Preparation
 
-## 1a) Load data
+## 1a) Load and tidy data
 
 You can use your own data or the data provided from the Devenish et al.,
 (2022) study. If using your own data please ensure it is in the same
@@ -154,7 +154,7 @@ rownames(data) <- data$ID
 
 # 2) Run the matching using the main matching specification
 
-## 2.1) Run the matching
+## 2a) Run the matching
 
 The below code uses the main specification chosen in the Devenish et
 al., study. 1-1 nearest neighbour Mahalanobis matching, without
@@ -188,8 +188,7 @@ Interrogate the summary statistics. Check whether the Std. Mean Diff for
 the matched data is less than 0.2 and the number of treated units which
 were matched.
 
-Extract key summary statistics and combine into one dataframe which we
-call cov_balance.
+## 2b) Extract key summary statistics and combine into one dataframe which we call cov_balance.
 
 ```{r}
 
@@ -213,7 +212,7 @@ treated units.
 Now, we need extract the matched control pixels and test whether the
 matched data meet the condition of parallel trends.
 
-## 2.2) Extract matched pairs
+## 2c) Extract matched pairs
 
 ```{r}
 m.data <- match.data(Main_output, group = "all", distance = "distance", weights = "weights", subclass = "subclass", data = data, drop.unmatched = TRUE)
@@ -223,17 +222,17 @@ m.data <- match.data(Main_output, group = "all", distance = "distance", weights 
 m.data contains the matched treated (n = 2862) and control (n = 2862)
 observations
 
-## 2.3) Reformat data aggregating pixels by treatment status and year
+# 3) Aggregate the matched pixel data by year and group (offset or control)
 
 For the next stage (outcome regressions), we no longer need the
 covariate data. We are only interested in comparing deforestation
 between the treated and control samples, before and after the offset was
 protected in 2011.
 
-Aggregate the pixel data to the level of the sample (offset or control)
-and by year. This gives the total count of deforestation per year in the
-offset and the control sample. If using your own data set y to the year
-of the intervention.
+## 3a) Aggregate the matched pixel data by year and group 
+
+Aggregate the matched pixel data by year and group by counting the number of pixels deforested each year (1-19 in the Tree_loss variable) within the offset and comparison sample. This produces a long-format dataframe where there are 38 observations, one for each year for both the offset and comparison sample. The value in Annual_Deforestation gives the total count of deforestation per year in each sample. 
+
 
 ```{r}
 
@@ -242,42 +241,55 @@ annual_defor <- data.frame(table(factor(m.data$Tree_loss, levels = 1:19), m.data
 names(annual_defor) <- c("Year", "Treated", "Annual_Deforestation")
 annual_defor$Year <- as.numeric(annual_defor$Year)
 
+```
+
+
+## 3b) Add a binary time variable
+
+Assign a binary variable indicating whether the observation is from a year before (0) or after (1) treatment. 
+
+If using your own data set y to the year of the intervention.
+
+
+```{r}
+
 # Set y to the year of the intervention. In this example, the Ankerana offset was first protected in 2011.
 
 y <- 11
-
-# Assign a binary variable indicating whether the observation is from a year before (0) or after (1) treatment. 
 
 annual_defor$Time <- factor(ifelse(annual_defor$Year >= y, 1,0))
 
 
 ```
 
+
+## 3c) Transform the outcome variable 
+
 A log(y+1) transformation of the outcome variable is required because
 the non-normal properties of count data violate assumptions of
 homoscedascity of linear models.
 
-Transform the outcome variable:
+log_annual_defor is now used as the outcome variable from now on.
 
 ```{r}
 annual_defor$log_annual_defor <- log(annual_defor$Annual_Deforestation + 1)
 
 ```
 
-## 2.3) Test for parallel trends
+# 4) Test for parallel trends
 
 Before running the DiD regressions we need to check that the matched
 data conforms to the assumption of parallel trends in deforestation in
 the pre-intervention period.
 
-Subset the data to leave only the pre-intervention years:
+## 4a) Subset the data to leave only the pre-intervention years
 
 ```{r}
 data_before <- annual_defor[(annual_defor$Year < y),]
 
 ```
 
-Run the regression to test for parallel trends:
+## 4b) Run the regression to test for parallel trends
 
 ```{r}
 
@@ -297,9 +309,11 @@ As the coefficient of Year is not significant, there is no significant
 trend in deforestation over time in the pre-intervention period in the
 control nor the offset sample.
 
-## 2.4) Run DiD regression
+# 5) Run the DiD regression
 
-Formula = y \~ treatment + time + (treatment x time). This time use the
+## 5a) Run the regression 
+
+Formula = y ~ treatment + time + (treatment x time). This time use the
 full dataset.
 
 The interaction between treated and time is the coefficent of interest.
@@ -328,6 +342,10 @@ pre-intervention differences between the two samples).
 However, this estimate relates to the log-transformed count of
 deforestation, back-transform to get a more meaningful result.
 
+## 5b) Back-transform the coefficient of interest
+
+Back-transforming means the coefficient represents the percentage reduction in deforestation after protection in Ankerana, relative to the estimated counterfactual.
+
 ```{r}
 
 exp(coef(DiD_res)[4])-1
@@ -338,7 +356,8 @@ exp(confint(DiD_res)[4,])-1
 This shows that protection reduced deforestation by an estimated average
 of 96% (89 - 98%) per year within Ankerana.
 
-# 3) Robustness checks
+
+# 6)	Check the robustness of these results to alternative matching specifications
 
 Check these results are robust to alternative matching model choices. We
 do this in two stages. First, we vary the choice of statistical distance
@@ -355,7 +374,7 @@ regressions iteratively for each of different matching specifications.
 (however long it took to run the matching for the main specification
 multiplied by \~54 times!)\*\*
 
-## 3.1) Test the effect of varying the parameters
+## 6a) Run the_parameters_loop to test the effect of varying the statistical distance measure and model parameters
 
 ```{r}
 the_parameters_loop <- function(x, caliper_value, replacement, distance, ratio, year){
@@ -506,7 +525,7 @@ write.csv(loop_parameters, "Output/loop_parameters_results.csv")
 
 ```
 
-## 3.2) Test the effect of including additional covariates
+## 6b) Run the_cov_loop to test the effect of including additional covariates
 
 Test the effect of adding additional covariates holding the distance
 measure and model parameters constant (as in the main specification):
@@ -664,7 +683,7 @@ the_cov_loop <- function(data, ycreation, caliper_value) {
 
 ```
 
-Merge outputs from the two loops:
+## 6c) Merge outputs from the two loops:
 
 ```{r}
 
@@ -672,7 +691,7 @@ robustness_checks <- rbind(loop_parameters, synthesis_loop_cov)
 
 ```
 
-# **4) Explore these results**
+## 6d) Examine the results
 
 Set criteria to identify specifications which were a-posteriori invalid,
 i.e. those which did not match a sufficient number of treated units,
@@ -680,8 +699,9 @@ produce acceptable covariate balance, or parallel trends in
 pre-intervention outcomes. Exclude these results because they do not
 represent appropriate counterfactual comparisons.
 
-Explore the remaining results. Try plotting the coefficients,
-calculating the standard deviation, or extracting the highest 10% and
+## 6e) Explore the remaining results. 
+
+Try plotting the coefficients, calculating the standard deviation, or extracting the highest 10% and
 lowest 10% of estimates.
 
 **Questions:**
@@ -696,3 +716,113 @@ lowest 10% of estimates.
     conducted a step-wise regression to quantify which modelling choices
     had the greatest influence on estimates in his study. You could
     consider doing the same in your study.
+    
+    
+
+# 7) Run a fixed effects panel regression on data from all four offsets
+
+## 7a) Load pre-prepared, matched datasets for the other three offsets, tidy and merge with Ankerana data
+
+```{r}
+
+# Load pre-prepared matched and aggregated data for the other three offsets:
+
+CZ_FE_dat <- read.csv('Input_data_for_exercise/CZ_FE_dat.csv')
+CFAM_FE_dat <- read.csv('Input_data_for_exercise/CFAM_FE_dat.csv')
+TTF_FE_dat <- read.csv('Input_data_for_exercise/TTF_FE_dat.csv')
+
+ANK_FE_dat <- annual_defor
+
+
+# Change the column names in the data the other offsets to match those of Ankerana. Create function and then apply to all new datasets.
+
+tidy_data <- function(data){
+  data <- data[, -1] %>%         # Remove the first column X
+    rename(Time = TimeF) %>%     # Rename columns to match those in ANK_FE_dat
+    rename(Treated = TreatedF)
+}
+
+CZ_FE_dat <- tidy_data(CZ_FE_dat)
+CFAM_FE_dat <- tidy_data(CFAM_FE_dat)
+TTF_FE_dat <- tidy_data(TTF_FE_dat)
+
+
+# Change the name of the matched control samples in each of the datasets. They are currently all called 'Cont' so when the data are pooled, the plm function will assume these observations are all from a single group, leading to an unbalanced panel. We need to change the names to ensure that when the data are pooled, each control sample is treated as a separate sample.
+
+CZ_FE_dat$Sample[CZ_FE_dat$Sample == 'Cont'] <- 'CZ1'
+CFAM_FE_dat$Sample[CFAM_FE_dat$Sample == 'Cont'] <- 'CFAM1'
+TTF_FE_dat$Sample[TTF_FE_dat$Sample == 'Cont'] <- 'TTF1'
+
+# Make the sample variable a factor
+
+CZ_FE_dat$Sample <- as.factor(CZ_FE_dat$Sample)
+CFAM_FE_dat$Sample <- as.factor(CFAM_FE_dat$Sample)
+TTF_FE_dat$Sample <- as.factor(TTF_FE_dat$Sample)
+
+# Add a sample column to ANK_FE_dat
+
+ANK_FE_dat$Sample <- ifelse(ANK_FE_dat$Treated == 1, 'ANK', 'ANK1')
+
+# Factorise
+
+ANK_FE_dat$Sample <- as.factor(ANK_FE_dat$Sample)
+
+# Re-order columns in ANK_FE_dat to match the other datasets
+
+ANK_FE_dat <- ANK_FE_dat[, c(1,6, 3, 4, 2, 5)]
+
+
+# Merge all four offset-control datasets
+
+FE_dat <- rbind(ANK_FE_dat, CFAM_FE_dat, CZ_FE_dat, TTF_FE_dat)
+
+# We need to factorise the year variable
+
+FE_dat$Year <- factor(FE_dat$Year)
+
+
+# Make one variable indicating treated status. Tr = 1 for observations from an offset after protection and 0 for observations from an offset before protection and the control sample. Cannot use Treated and Time and the interaction because these are collinear with the fixed effects. 
+
+FE_dat$Tr <- ifelse(FE_dat$Treated== "1" & FE_dat$Time== "1",1,0) 
+
+
+```
+
+
+## 7b) Run the fixed effects panel regression
+
+Tr is the coefficient of interest in this regression. A significant negative coefficient indicates there was significant reduction in the log-transformed count of deforestation following protection of the four biodiversity offsets.
+
+```{r}
+
+FE_all <- plm(log_annual_defor ~ Tr, 
+              data= FE_dat, index = c("Sample", "Year"), model= "within", effect = "twoways")
+summary(FE_all)
+
+
+```
+
+## 7c) Back-transform the estimates.
+
+```{r}
+
+(exp(coef(FE_all))-1)*100   
+(exp(confint(FE_all))-1)*100   
+
+```
+Interrogate these results. Did offset protection reduce deforestation on average across all four offsets?
+
+...
+
+Yes! The coefficient of Tr is negative and significant. Backtransforming this estimate shows that protection reduced deforestation across the entire offset portfolio by an average of 58% per year, relative to the estimated counterfactual. The 95% confidence interval on this estimate is 37 - 73%.
+
+
+
+
+
+
+
+
+
+
+
